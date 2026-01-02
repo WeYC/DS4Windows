@@ -20,31 +20,44 @@ jobs:
       - name: Setup .NET SDK
         uses: actions/setup-dotnet@v4
         with:
-          # 根据你的项目目标调整（例如 8.0.x / 7.0.x / 6.0.x）
           dotnet-version: '8.0.x'
 
-      - name: Restore
-        run: dotnet restore DS4Windows.sln
+      - name: Restore solution
+        run: |
+          echo "Restoring DS4WindowsWPF.sln"
+          dotnet restore DS4WindowsWPF.sln
 
-      - name: Build
-        run: dotnet build DS4Windows.sln --configuration Release --no-restore
+      - name: Build solution
+        run: dotnet build DS4WindowsWPF.sln --configuration Release --no-restore
 
-      - name: Publish all projects (SDK-style)
+      - name: Publish executable projects (from solution)
         shell: pwsh
         run: |
-          # Publish every .csproj found to publish/<ProjectName>
           $pubDir = "$env:GITHUB_WORKSPACE\publish"
           if (Test-Path $pubDir) { Remove-Item $pubDir -Recurse -Force }
           New-Item -ItemType Directory -Path $pubDir | Out-Null
 
-          $csprojs = Get-ChildItem -Path $env:GITHUB_WORKSPACE -Recurse -Filter *.csproj -ErrorAction SilentlyContinue
-          if ($csprojs.Count -eq 0) { Write-Host "No .csproj files found; skipping publish."; exit 0 }
+          # Find csproj files referenced by the solution (safer than publishing all csproj in repo)
+          $slnPath = Join-Path $env:GITHUB_WORKSPACE 'DS4WindowsWPF.sln'
+          $projPaths = Select-String -Path $slnPath -Pattern '\.csproj' -AllMatches |
+                       ForEach-Object { $_.Matches } | ForEach-Object { $_.Value.Trim() } |
+                       ForEach-Object { $_ -replace '\s*\\\s*', '\' } |
+                       ForEach-Object { if ([System.IO.Path]::IsPathRooted($_)) { $_ } else { Join-Path $env:GITHUB_WORKSPACE $_ } }
 
-          foreach ($p in $csprojs) {
-            $projName = [System.IO.Path]::GetFileNameWithoutExtension($p.Name)
+          if ($projPaths.Count -eq 0) {
+            Write-Error "No .csproj paths found in DS4WindowsWPF.sln."
+            exit 1
+          }
+
+          foreach ($p in $projPaths) {
+            if (-not (Test-Path $p)) {
+              Write-Warning "Referenced project not found on disk: $p"
+              continue
+            }
+            $projName = [System.IO.Path]::GetFileNameWithoutExtension($p)
             $out = Join-Path $pubDir $projName
-            Write-Host "Publishing $($p.FullName) -> $out"
-            dotnet publish $p.FullName -c Release -o $out -r win-x64 --self-contained false
+            Write-Host "Publishing $p -> $out"
+            dotnet publish $p -c Release -o $out -r win-x64 --self-contained false
           }
 
       - name: Package published files
@@ -85,12 +98,7 @@ jobs:
         with:
           files: release-artifact/**
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.ACCOUNT_TOKEN }}
 
       - name: (Optional) Show uploaded files
         run: ls -R release-artifact || true
-
-# Notes:
-# - 该 workflow 会查找仓库中所有 .csproj 并对每个项目执行 dotnet publish，然后把 publish 目录打包为一个 ZIP。
-# - 如只需发布特定项目，请把 publish 步骤改为发布指定 csproj（例如：dotnet publish src/DS4Windows/DS4Windows.csproj ...）。
-# - 根据项目是否为桌面 WPF 且依赖 Windows-only API，保留 runs-on: windows-latest。若为跨平台 CLI/library，可使用 ubuntu-latest 并移除 -r win-x64。
