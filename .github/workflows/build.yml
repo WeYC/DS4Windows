@@ -1,0 +1,96 @@
+name: Build and Release DS4Windows (SDK-style)
+
+on:
+  push:
+    branches: [ master ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build and Publish (.NET SDK-style)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          # 根据你的项目目标调整（例如 8.0.x / 7.0.x / 6.0.x）
+          dotnet-version: '8.0.x'
+
+      - name: Restore
+        run: dotnet restore DS4Windows.sln
+
+      - name: Build
+        run: dotnet build DS4Windows.sln --configuration Release --no-restore
+
+      - name: Publish all projects (SDK-style)
+        shell: pwsh
+        run: |
+          # Publish every .csproj found to publish/<ProjectName>
+          $pubDir = "$env:GITHUB_WORKSPACE\publish"
+          if (Test-Path $pubDir) { Remove-Item $pubDir -Recurse -Force }
+          New-Item -ItemType Directory -Path $pubDir | Out-Null
+
+          $csprojs = Get-ChildItem -Path $env:GITHUB_WORKSPACE -Recurse -Filter *.csproj -ErrorAction SilentlyContinue
+          if ($csprojs.Count -eq 0) { Write-Host "No .csproj files found; skipping publish."; exit 0 }
+
+          foreach ($p in $csprojs) {
+            $projName = [System.IO.Path]::GetFileNameWithoutExtension($p.Name)
+            $out = Join-Path $pubDir $projName
+            Write-Host "Publishing $($p.FullName) -> $out"
+            dotnet publish $p.FullName -c Release -o $out -r win-x64 --self-contained false
+          }
+
+      - name: Package published files
+        shell: pwsh
+        id: package
+        run: |
+          $zip = "$env:GITHUB_WORKSPACE\ds4windows-$env:GITHUB_RUN_ID.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          if (Test-Path "$env:GITHUB_WORKSPACE\publish") {
+            Compress-Archive -Path "$env:GITHUB_WORKSPACE\publish\*" -DestinationPath $zip -Force
+            Write-Host "ZIP created: $zip"
+            echo "artifact=$zip" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          } else {
+            Write-Error "No publish output found to package."
+            exit 1
+          }
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ds4windows-build
+          path: ${{ steps.package.outputs.artifact }}
+
+  release:
+    name: Create Release (on tag)
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ds4windows-build
+          path: release-artifact
+
+      - name: Create GitHub Release and upload artifacts
+        uses: softprops/action-gh-release@v1
+        with:
+          files: release-artifact/**
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: (Optional) Show uploaded files
+        run: ls -R release-artifact || true
+
+# Notes:
+# - 该 workflow 会查找仓库中所有 .csproj 并对每个项目执行 dotnet publish，然后把 publish 目录打包为一个 ZIP。
+# - 如只需发布特定项目，请把 publish 步骤改为发布指定 csproj（例如：dotnet publish src/DS4Windows/DS4Windows.csproj ...）。
+# - 根据项目是否为桌面 WPF 且依赖 Windows-only API，保留 runs-on: windows-latest。若为跨平台 CLI/library，可使用 ubuntu-latest 并移除 -r win-x64。
