@@ -1,104 +1,90 @@
-name: Build and Release DS4Windows (SDK-style)
+name: Build and Publish
 
 on:
   push:
-    branches: [ master ]
-    tags: [ 'v*' ]
+    branches: 
+      - master
+  pull_request:
+    branches: 
+      - master
   workflow_dispatch:
 
-jobs:
-  build:
-    name: Build and Publish (.NET SDK-style)
+jobs: 
+  build: 
     runs-on: windows-latest
-
+    strategy:
+      matrix:
+        platform: [x64, x86]
+    
     steps:
-      - name: Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Setup .NET SDK
+      - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
 
-      - name: Restore solution
-        run: |
-          echo "Restoring DS4WindowsWPF.sln"
-          dotnet restore DS4WindowsWPF.sln
+      - name:  Restore dependencies
+        run: dotnet restore DS4WindowsWPF.sln
 
-      - name: Build solution
-        run: dotnet build DS4WindowsWPF.sln --configuration Release --no-restore
+      - name: Build for ${{ matrix.platform }}
+        run: dotnet build DS4WindowsWPF.sln -c Release -p:Platform=${{ matrix.platform }} --no-restore
 
-      - name: Publish executable projects (from solution)
-        shell: pwsh
-        run: |
-          $pubDir = "$env:GITHUB_WORKSPACE\publish"
-          if (Test-Path $pubDir) { Remove-Item $pubDir -Recurse -Force }
-          New-Item -ItemType Directory -Path $pubDir | Out-Null
+      - name:  Publish for ${{ matrix.platform }}
+        run: dotnet publish DS4WindowsWPF.sln -c Release -p:Platform=${{ matrix.platform }} -o ./publish/${{ matrix.platform }} --no-restore --no-build
 
-          # Find csproj files referenced by the solution (safer than publishing all csproj in repo)
-          $slnPath = Join-Path $env:GITHUB_WORKSPACE 'DS4WindowsWPF.sln'
-          $projPaths = Select-String -Path $slnPath -Pattern '\.csproj' -AllMatches |
-                       ForEach-Object { $_.Matches } | ForEach-Object { $_.Value.Trim() } |
-                       ForEach-Object { $_ -replace '\s*\\\s*', '\' } |
-                       ForEach-Object { if ([System.IO.Path]::IsPathRooted($_)) { $_ } else { Join-Path $env:GITHUB_WORKSPACE $_ } }
-
-          if ($projPaths.Count -eq 0) {
-            Write-Error "No .csproj paths found in DS4WindowsWPF.sln."
-            exit 1
-          }
-
-          foreach ($p in $projPaths) {
-            if (-not (Test-Path $p)) {
-              Write-Warning "Referenced project not found on disk: $p"
-              continue
-            }
-            $projName = [System.IO.Path]::GetFileNameWithoutExtension($p)
-            $out = Join-Path $pubDir $projName
-            Write-Host "Publishing $p -> $out"
-            dotnet publish $p -c Release -o $out -r win-x64 --self-contained false
-          }
-
-      - name: Package published files
-        shell: pwsh
-        id: package
-        run: |
-          $zip = "$env:GITHUB_WORKSPACE\ds4windows-$env:GITHUB_RUN_ID.zip"
-          if (Test-Path $zip) { Remove-Item $zip -Force }
-          if (Test-Path "$env:GITHUB_WORKSPACE\publish") {
-            Compress-Archive -Path "$env:GITHUB_WORKSPACE\publish\*" -DestinationPath $zip -Force
-            Write-Host "ZIP created: $zip"
-            echo "artifact=$zip" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          } else {
-            Write-Error "No publish output found to package."
-            exit 1
-          }
-
-      - name: Upload build artifact
+      - name: Upload artifacts for ${{ matrix.platform }}
         uses: actions/upload-artifact@v4
         with:
-          name: ds4windows-build
-          path: ${{ steps.package.outputs.artifact }}
+          name:  DS4Windows-${{ matrix.platform }}
+          path: ./publish/${{ matrix.platform }}
+          retention-days: 30
 
-  release:
-    name: Create Release (on tag)
-    if: startsWith(github.ref, 'refs/tags/')
+      - name: Create release artifacts
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        run: |
+          cd ./publish/${{ matrix.platform }}
+          7z a -tzip "DS4Windows-${{ matrix. platform }}.zip" .
+          move "DS4Windows-${{ matrix.platform }}.zip" ../.. 
+
+      - name: Upload release artifacts
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: actions/upload-artifact@v4
+        with: 
+          name: release-artifacts-${{ matrix.platform }}
+          path: DS4Windows-${{ matrix.platform }}.zip
+          retention-days: 90
+
+  create-release:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
+    if: github. event_name == 'push' && github.ref == 'refs/heads/master'
+    
     steps:
-      - name: Download build artifact
+      - name:  Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          name: ds4windows-build
-          path: release-artifact
+          path: all-artifacts
 
-      - name: Create GitHub Release and upload artifacts
-        uses: softprops/action-gh-release@v1
-        with:
-          files: release-artifact/**
+      - name: Create GitHub Release
+        uses:  softprops/action-gh-release@v1
+        with: 
+          files: |
+            all-artifacts/release-artifacts-x64/DS4Windows-x64.zip
+            all-artifacts/release-artifacts-x86/DS4Windows-x86.zip
+          tag_name: build-${{ github.run_number }}
+          body: |
+            Automated build from master branch
+            
+            Build artifacts:
+            - DS4Windows-x64.zip (x64 platform)
+            - DS4Windows-x86.zip (x86 platform)
+            
+            Build number: ${{ github. run_number }}
+            Commit: ${{ github.sha }}
         env:
           GITHUB_TOKEN: ${{ secrets.ACCOUNT_TOKEN }}
-
-      - name: (Optional) Show uploaded files
-        run: ls -R release-artifact || true
