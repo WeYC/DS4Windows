@@ -1,16 +1,15 @@
-name: Build and Publish
+name: Build and Publish DS4Windows
 
 on:
   push:
     branches: 
       - master
-  pull_request:
-    branches: 
-      - master
-  workflow_dispatch:
+  workflow_dispatch: 
+  release:
+    types: [created]
 
-jobs: 
-  build: 
+jobs:  
+  build:  
     runs-on: windows-latest
     strategy:
       matrix:
@@ -18,73 +17,78 @@ jobs:
     
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses:  actions/checkout@v4
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
 
-      - name:  Restore dependencies
+      - name: Restore dependencies
         run: dotnet restore DS4WindowsWPF.sln
 
       - name: Build for ${{ matrix.platform }}
-        run: dotnet build DS4WindowsWPF.sln -c Release -p:Platform=${{ matrix.platform }} --no-restore
+        run: dotnet build DS4WindowsWPF.sln -c Release -p:Platform=${{ matrix. platform }} --no-restore
 
       - name:  Publish for ${{ matrix.platform }}
-        run: dotnet publish DS4WindowsWPF.sln -c Release -p:Platform=${{ matrix.platform }} -o ./publish/${{ matrix.platform }} --no-restore --no-build
+        run: dotnet publish DS4Windows/DS4WinWPF.csproj -c Release -p:Platform=${{ matrix.platform }} -o ./publish-${{ matrix.platform }} --no-restore --no-build
 
-      - name: Upload artifacts for ${{ matrix.platform }}
+      - name:  Create distribution package for ${{ matrix.platform }}
+        shell: pwsh
+        run: |
+          $pubDir = "publish-${{ matrix.platform }}"
+          $distDir = "dist/${{ matrix.platform }}"
+          
+          # 创建干净的发布目录
+          if (Test-Path $distDir) { Remove-Item $distDir -Recurse -Force }
+          New-Item -ItemType Directory -Path $distDir | Out-Null
+          
+          # 复制所有编译输出文件到发布目录
+          Copy-Item "$pubDir/*" -Destination $distDir -Recurse -Force
+          
+          # 生成 ZIP 包
+          $zipPath = "DS4Windows-${{ matrix. platform }}.zip"
+          if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+          
+          Compress-Archive -Path $distDir -DestinationPath $zipPath -Force
+          echo "Created $zipPath"
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name:  DS4Windows-${{ matrix.platform }}
-          path: ./publish/${{ matrix.platform }}
-          retention-days: 30
-
-      - name: Create release artifacts
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-        run: |
-          cd ./publish/${{ matrix.platform }}
-          7z a -tzip "DS4Windows-${{ matrix. platform }}.zip" .
-          move "DS4Windows-${{ matrix.platform }}.zip" ../.. 
-
-      - name: Upload release artifacts
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-        uses: actions/upload-artifact@v4
-        with: 
-          name: release-artifacts-${{ matrix.platform }}
+          name:  ds4windows-${{ matrix. platform }}-build
           path: DS4Windows-${{ matrix.platform }}.zip
-          retention-days: 90
+          retention-days: 30
 
   create-release:
     needs: build
-    runs-on: windows-latest
-    if: github. event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
     
     steps:
-      - name:  Checkout code
-        uses: actions/checkout@v4
-
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          path: all-artifacts
+          path: artifacts
 
       - name: Create GitHub Release
-        uses:  softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v1
         with: 
           files: |
-            all-artifacts/release-artifacts-x64/DS4Windows-x64.zip
-            all-artifacts/release-artifacts-x86/DS4Windows-x86.zip
-          tag_name: build-${{ github.run_number }}
+            artifacts/ds4windows-x64-build/DS4Windows-x64.zip
+            artifacts/ds4windows-x86-build/DS4Windows-x86.zip
           body: |
-            Automated build from master branch
+            DS4Windows Release ${{ github.ref_name }}
             
-            Build artifacts:
-            - DS4Windows-x64.zip (x64 platform)
-            - DS4Windows-x86.zip (x86 platform)
+            #### Downloads
+            - `DS4Windows-x64.zip` - 64-bit version
+            - `DS4Windows-x86.zip` - 32-bit version
             
-            Build number: ${{ github. run_number }}
-            Commit: ${{ github.sha }}
+            #### Requirements
+            - .NET 8 Desktop Runtime (x64 or x86)
+            
+            #### Extract & Run
+            1. Extract the ZIP file
+            2. Run `DS4Windows.exe`
         env:
-          GITHUB_TOKEN: ${{ secrets.ACCOUNT_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
